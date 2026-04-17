@@ -13,6 +13,8 @@ import numpy as np
 from scipy.optimize import linprog
 from typing import Dict
 
+__all__ = ["chsh_values", "in_local_polytope", "npa_level1"]
+
 try:
     import cvxpy as cp
     HAS_CVXPY = True

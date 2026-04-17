@@ -5,7 +5,7 @@ Provides ground-truth data generation for validating inference.
 
 import numpy as np
 from typing import Dict, Tuple, List, Optional
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # Pauli matrices
 I2 = np.eye(2, dtype=complex)
@@ -14,6 +14,22 @@ I2 = np.eye(2, dtype=complex)
 σ_z = np.array([[1, 0], [0, -1]], dtype=complex)
 PAULI = [I2, σ_x, σ_y, σ_z]
 PAULI_LABELS = ['I', 'X', 'Y', 'Z']
+
+__all__ = [
+    "bell_state",
+    "werner_state",
+    "bloch_vector",
+    "measurement_operator",
+    "fano_decomposition",
+    "rho_from_fano",
+    "quantum_expectation",
+    "outcome_probabilities",
+    "horodecki_smax",
+    "ExperimentData",
+    "generate_data",
+    "chsh_settings",
+    "tomographic_settings",
+]
 
 # Bloch sphere direction labels → (θ, φ)
 DIRECTION_ANGLES = {
@@ -24,7 +40,19 @@ DIRECTION_ANGLES = {
 
 
 def bell_state(name: str = "phi_plus") -> np.ndarray:
-    """4×4 density matrix for standard Bell states."""
+    """
+    4x4 density matrix for standard Bell states.
+
+    Parameters
+    ----------
+    name : str
+        One of 'phi_plus', 'phi_minus', 'psi_plus', 'psi_minus'.
+
+    Raises
+    ------
+    ValueError
+        If *name* is not a recognised Bell state.
+    """
     e0, e1 = np.array([1, 0], dtype=complex), np.array([0, 1], dtype=complex)
     vecs = {
         "phi_plus":  (np.kron(e0, e0) + np.kron(e1, e1)) / np.sqrt(2),
@@ -32,12 +60,33 @@ def bell_state(name: str = "phi_plus") -> np.ndarray:
         "psi_plus":  (np.kron(e0, e1) + np.kron(e1, e0)) / np.sqrt(2),
         "psi_minus": (np.kron(e0, e1) - np.kron(e1, e0)) / np.sqrt(2),
     }
+    if name not in vecs:
+        raise ValueError(
+            f"Unknown Bell state '{name}'. "
+            f"Choose from {sorted(vecs.keys())}."
+        )
     ψ = vecs[name]
     return np.outer(ψ, ψ.conj())
 
 
 def werner_state(p: float) -> np.ndarray:
-    """ρ = p|Ψ⁻⟩⟨Ψ⁻| + (1-p)I/4. Violates CHSH for p > 1/√2."""
+    """
+    Werner state: rho = p|Psi-><Psi-| + (1-p)I/4.
+
+    Violates CHSH for p > 1/sqrt(2).
+
+    Parameters
+    ----------
+    p : float
+        Mixing parameter in [0, 1].
+
+    Raises
+    ------
+    ValueError
+        If *p* is outside [0, 1].
+    """
+    if not (0.0 <= p <= 1.0):
+        raise ValueError(f"Mixing parameter p must be in [0, 1], got {p}.")
     return p * bell_state("psi_minus") + (1 - p) * np.eye(4) / 4
 
 
@@ -126,10 +175,28 @@ def generate_data(ρ: np.ndarray,
                   n_per_setting: int,
                   rng: Optional[np.random.Generator] = None) -> ExperimentData:
     """
-    Sample binary ±1 outcomes from quantum state across multiple settings.
-    
-    settings: list of (θ_a, φ_a, θ_b, φ_b)
+    Sample binary +/-1 outcomes from quantum state across multiple settings.
+
+    Parameters
+    ----------
+    rho : np.ndarray
+        4x4 density matrix.
+    settings : list of (theta_a, phi_a, theta_b, phi_b)
+        Measurement setting tuples.
+    n_per_setting : int
+        Number of samples per setting (must be >= 1).
+    rng : numpy Generator, optional
+        Random number generator.
+
+    Raises
+    ------
+    ValueError
+        If *settings* is empty or *n_per_setting* < 1.
     """
+    if not settings:
+        raise ValueError("settings must be a non-empty list.")
+    if n_per_setting < 1:
+        raise ValueError(f"n_per_setting must be >= 1, got {n_per_setting}.")
     if rng is None:
         rng = np.random.default_rng(42)
 

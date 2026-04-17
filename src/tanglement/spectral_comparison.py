@@ -31,9 +31,10 @@ import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
 import arviz as az
-from typing import Dict, List, Optional
-from dataclasses import dataclass
+from typing import Dict, List
 
+
+__all__ = ["SpectralModelComparison"]
 
 # ─── Real-arithmetic cavity transmission ──────────────────────────────
 

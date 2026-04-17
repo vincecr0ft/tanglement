@@ -24,10 +24,23 @@ or quantum (structured/gapped → can violate CHSH).
 
 import numpy as np
 from typing import Dict, Tuple, Optional, List
+
+__all__ = [
+    "CavityParams",
+    "SpinParams",
+    "cavity_transmission",
+    "lorentzian_self_energy",
+    "qsl_self_energy",
+    "QubitProbeParams",
+    "qsl_mediated_correlation",
+    "generate_qubit_bell_data",
+    "simulate_esr_spectrum",
+    "SpectralFanoExtractor",
+    "entanglement_witness_from_correlations",
+]
 from dataclasses import dataclass
 
-from .quantum import (ExperimentData, fano_decomposition, rho_from_fano,
-                      bell_state, werner_state, PAULI, I2, σ_x, σ_y, σ_z)
+from .quantum import ExperimentData
 
 
 # ─── Cavity-spin Hamiltonian ──────────────────────────────────────────
@@ -168,7 +181,7 @@ def qsl_mediated_correlation(rho_qsl: np.ndarray,
     # The QSL mediates an effective 2-qubit state between the probes.
     # The probe frequencies/phases select the measurement basis.
     # This is exactly our existing quantum.py framework.
-    from .quantum import measurement_operator, quantum_expectation
+    from .quantum import quantum_expectation
     
     # Map (omega, phi) to Bloch sphere angles
     # Frequency detuning → polar angle (how strongly qubit couples to QSL)
@@ -199,7 +212,7 @@ def generate_qubit_bell_data(rho_eff: np.ndarray,
     n_per_setting : measurements per setting pair
     readout_fidelity : probability of correct single-shot readout
     """
-    from .quantum import outcome_probabilities, generate_data
+    from .quantum import generate_data
     
     # Generate ideal data
     data = generate_data(rho_eff, settings, n_per_setting, rng=rng)
@@ -214,9 +227,7 @@ def generate_qubit_bell_data(rho_eff: np.ndarray,
         data.outcomes_x[flip_x] *= -1
         data.outcomes_y[flip_y] *= -1
         
-        # Update true correlations to account for attenuation
-        F2 = readout_fidelity**2 + (1 - readout_fidelity)**2  # net fidelity
-        # E_observed = (2F-1)² E_true for binary readout
+        # E_observed = (2F-1)^2 E_true for binary readout
         eta = (2 * readout_fidelity - 1)**2
         data.true_correlations = {k: v * eta 
                                    for k, v in data.true_correlations.items()}
@@ -312,8 +323,7 @@ class SpectralFanoExtractor:
         
         def residual_lorentzian(params):
             omega_s, gamma, g2N = params
-            sp = SpinParams(omega_s, gamma, np.sqrt(g2N / max(1, 1)), 1)
-            # Override for direct g²N parameterisation
+            # Direct g2N parameterisation (no SpinParams needed)
             sigma = g2N / (omega - omega_s + 1j * gamma / 2)
             s21 = cavity_transmission(omega, self.cavity, sigma)
             model_data = np.abs(s21)**2
@@ -333,6 +343,7 @@ class SpectralFanoExtractor:
             bounds = [(omega.min(), omega.max()), (1e-4, 1.0), (1e-6, 1.0)]
             res = minimize(residual_lorentzian, x0, bounds=bounds, method='L-BFGS-B')
             omega_s, gamma, g2N = res.x
+            # SpinParams not needed: parameters extracted directly from fit
             return {'omega_s': omega_s, 'gamma': gamma, 'g2N': g2N,
                     'chi2': res.fun, 'model': model, 'ndf': len(omega) - 3}
         

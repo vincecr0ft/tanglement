@@ -11,27 +11,43 @@ Four models, all returning PosteriorResult:
 
 import numpy as np
 import pymc as pm
-import arviz as az
 from dataclasses import dataclass
-from typing import Dict, Optional
-import warnings
+from typing import Dict, Optional, Tuple
 
 from .quantum import ExperimentData, bloch_vector, rho_from_fano
 from .dag import BellDAG
 
 
+__all__ = ["PosteriorResult", "BinaryConjugate", "BayesianBootstrap",
+           "Tomographic", "BalkePearl"]
+
 # ─── Common output ────────────────────────────────────────────────────
 
 @dataclass
 class PosteriorResult:
-    """Unified output from all inference models."""
-    correlations: Dict[int, Dict]       # k → {mean, std, ci, true}
+    """
+    Unified output from all inference models.
+
+    Attributes
+    ----------
+    correlations : dict
+        Mapping setting index *k* to summary dict with keys
+        ``mean``, ``std``, ``ci``, and optionally ``true`` and ``covered``.
+    chsh : dict
+        CHSH summary with ``mean``, ``std``, ``ci``, ``P_violates``.
+    extra : dict
+        Model-specific extras (e.g. posterior samples, Fano matrices).
+    idata : object or None
+        ArviZ InferenceData for PyMC-based models, else ``None``.
+    """
+    correlations: Dict[int, Dict]       # k -> {mean, std, ci, true}
     chsh: Dict                          # {mean, std, ci, P_violates}
     extra: Dict                         # model-specific extras
     idata: Optional[object] = None      # ArviZ InferenceData (PyMC models)
 
 
-def _corr_summary(samples, true=None):
+def _corr_summary(samples: np.ndarray, true: Optional[float] = None) -> Dict:
+    """Compute posterior summary statistics from an array of samples."""
     d = {'mean': float(np.mean(samples)), 'std': float(np.std(samples)),
          'ci': (float(np.percentile(samples, 2.5)),
                 float(np.percentile(samples, 97.5)))}
@@ -41,7 +57,7 @@ def _corr_summary(samples, true=None):
     return d
 
 
-def _chsh_from_4corr(c0, c1, c2, c3):
+def _chsh_from_4corr(c0: np.ndarray, c1: np.ndarray, c2: np.ndarray, c3: np.ndarray) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
     """Compute CHSH posterior samples from 4 correlation sample arrays."""
     combs = {'S1': c0+c1+c2-c3, 'S2': c0+c1-c2+c3,
              'S3': c0-c1+c2+c3, 'S4': -c0+c1+c2+c3}
@@ -50,7 +66,7 @@ def _chsh_from_4corr(c0, c1, c2, c3):
     return mx, combs
 
 
-def _chsh_horodecki(C_samples):
+def _chsh_horodecki(C_samples: np.ndarray) -> np.ndarray:
     """Horodecki S_max from (n, 3, 3) correlation tensor samples."""
     n = C_samples.shape[0]
     s = np.zeros(n)
@@ -72,7 +88,8 @@ class BinaryConjugate:
         self.alpha = np.ones(4) if alpha is None else np.asarray(alpha)
 
     def fit(self, data: ExperimentData, n_samples=20000, rng=None):
-        if rng is None: rng = np.random.default_rng(123)
+        if rng is None:
+            rng = np.random.default_rng(123)
         omap = {(1,1):0, (1,-1):1, (-1,1):2, (-1,-1):3}
         n_set = len(data.setting_pairs)
         csamp = {}
@@ -110,7 +127,8 @@ class BayesianBootstrap:
     """
 
     def fit(self, data: ExperimentData, n_samples=15000, rng=None):
-        if rng is None: rng = np.random.default_rng(123)
+        if rng is None:
+            rng = np.random.default_rng(123)
         n_set = len(data.setting_pairs)
         csamp = {}
 
@@ -138,7 +156,7 @@ class BayesianBootstrap:
         return PosteriorResult(
             correlations=corrs,
             chsh=_corr_summary(mx) | {'P_violates': float(np.mean(mx > 2))},
-            extra={},
+            extra={'chsh_samples': mx},
         )
 
 
@@ -172,7 +190,6 @@ class Tomographic:
 
         # Observed correlations and SEs
         obs_c, obs_se = np.zeros(n_set), np.zeros(n_set)
-        obs_ax, obs_bx = {}, {}
 
         for k in range(n_set):
             mask = data.setting_indices == k
@@ -234,7 +251,6 @@ class Tomographic:
         # Extract
         tc_post = idata.posterior['t_corr'].values.reshape(-1, 9)
         C_samp = tc_post.reshape(-1, 3, 3)
-        ns = tc_post.shape[0]
 
         # Predicted correlations
         c_pred = tc_post @ A.T
@@ -249,11 +265,17 @@ class Tomographic:
         T_mean = np.zeros((4, 4))
         T_mean[0, 0] = 1.0
         T_mean[1:, 1:] = np.mean(C_samp, axis=0)
+
+        T_std = np.zeros((4, 4))
+        T_std[1:, 1:] = np.std(C_samp, axis=0)
+
         if obs_a is not None:
             ta_post = idata.posterior['t_a'].values.reshape(-1, 3)
             tb_post = idata.posterior['t_b'].values.reshape(-1, 3)
             T_mean[1:, 0] = np.mean(ta_post, axis=0)
             T_mean[0, 1:] = np.mean(tb_post, axis=0)
+            T_std[1:, 0] = np.std(ta_post, axis=0)
+            T_std[0, 1:] = np.std(tb_post, axis=0)
 
         rho_mean = rho_from_fano(T_mean)
         eigvals = np.linalg.eigvalsh(rho_mean)
@@ -263,7 +285,7 @@ class Tomographic:
             chsh=_corr_summary(chsh_s) | {'P_violates': float(np.mean(chsh_s > 2))},
             extra={
                 'T_mean': T_mean,
-                'T_std': np.zeros_like(T_mean),  # filled below
+                'T_std': T_std,
                 'C_mean': np.mean(C_samp, axis=0),
                 'C_std': np.std(C_samp, axis=0),
                 'rho_eigenvalues': eigvals,
@@ -320,7 +342,6 @@ class BalkePearl:
                               return_inferencedata=True, init='adapt_diag')
 
         q_post = idata.posterior['q'].values.reshape(-1, 16)
-        ns = q_post.shape[0]
 
         # Correlations from q
         corr_post = q_post @ V  # (ns, 4)

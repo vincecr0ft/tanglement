@@ -1,20 +1,4 @@
-"""
-Complete pytest suite for tanglement.
-
-Covers every scenario validated during development:
-  - DAG structure (5 tests)
-  - Polytope geometry (4 tests)
-  - Quantum simulation (5 tests)
-  - Binary inference (7 tests)
-  - Tomographic inference (3 tests, slow)
-  - Balke-Pearl inference (3 tests, slow)
-  - Collider pipeline (4 tests)
-  - Cavity-QED / QSL (5 tests)
-  - Spectral model comparison (2 tests, slow)
-  - Full integration pipeline (2 tests)
-
-Total: 40 tests (30 fast + 10 slow/pymc)
-"""
+"""Complete pytest suite for tanglement."""
 import numpy as np
 import pytest
 from numpy.testing import assert_allclose
@@ -359,3 +343,90 @@ class TestIntegration:
         assert w['violates_corrected']
         eta = (2*F-1)**2
         assert not in_local_polytope(np.array([c[k]/eta for k in range(4)]))
+
+
+class TestInputValidation:
+    def test_bell_state_invalid_name(self):
+        from tanglement.quantum import bell_state
+        with pytest.raises(ValueError, match="Unknown Bell state"):
+            bell_state("not_a_state")
+
+    def test_werner_state_out_of_range(self):
+        from tanglement.quantum import werner_state
+        with pytest.raises(ValueError):
+            werner_state(-0.1)
+        with pytest.raises(ValueError):
+            werner_state(1.5)
+
+    def test_generate_data_empty_settings(self):
+        from tanglement.quantum import bell_state, generate_data
+        with pytest.raises(ValueError, match="non-empty"):
+            generate_data(bell_state('phi_plus'), [], 100)
+
+    def test_generate_data_zero_samples(self):
+        from tanglement.quantum import bell_state, generate_data, chsh_settings
+        with pytest.raises(ValueError, match="n_per_setting"):
+            generate_data(bell_state('phi_plus'), chsh_settings(), 0)
+
+
+class TestQuantumPrimitives:
+    def test_bloch_vector_z(self):
+        from tanglement.quantum import bloch_vector
+        b = bloch_vector(0.0, 0.0)
+        assert_allclose(b, [0, 0, 1], atol=1e-12)
+
+    def test_bloch_vector_x(self):
+        from tanglement.quantum import bloch_vector
+        b = bloch_vector(np.pi / 2, 0.0)
+        assert_allclose(b, [1, 0, 0], atol=1e-12)
+
+    def test_measurement_eigenvalues(self):
+        from tanglement.quantum import measurement_operator
+        M = measurement_operator(0.0, 0.0)
+        eigs = np.sort(np.linalg.eigvalsh(M))
+        assert_allclose(eigs, [-1, 1], atol=1e-12)
+
+    def test_outcome_probabilities_sum_to_one(self):
+        from tanglement.quantum import bell_state, outcome_probabilities
+        rho = bell_state('phi_plus')
+        probs = outcome_probabilities(rho, 0.0, 0.0, np.pi/4, 0.0)
+        assert_allclose(sum(probs.values()), 1.0, atol=1e-12)
+
+    def test_outcome_probabilities_consistent(self):
+        from tanglement.quantum import bell_state, outcome_probabilities, quantum_expectation
+        rho = bell_state('phi_plus')
+        θa, φa, θb, φb = 0.0, 0.0, np.pi/4, 0.0
+        probs = outcome_probabilities(rho, θa, φa, θb, φb)
+        E_from_probs = sum(x * y * p for (x, y), p in probs.items())
+        E_direct = quantum_expectation(rho, θa, φa, θb, φb)
+        assert_allclose(E_from_probs, E_direct, atol=1e-10)
+
+
+class TestTomographicStd:
+    @pytest.mark.slow
+    @pytest.mark.pymc
+    def test_t_std_nonzero(self):
+        from tanglement.quantum import bell_state, generate_data, tomographic_settings
+        from tanglement.inference import Tomographic
+        rho = bell_state('phi_plus')
+        data = generate_data(rho, tomographic_settings(), 3000,
+                             rng=np.random.default_rng(42))
+        r = Tomographic(fit_bloch=True).fit(
+            data, n_draws=500, n_tune=500, n_chains=1)
+        T_std = r.extra['T_std']
+        # Correlation block should have nonzero std
+        assert np.all(T_std[1:, 1:] > 0)
+        # Bloch vector stds should be nonzero when fit_bloch=True
+        assert np.all(T_std[1:, 0] > 0)
+        assert np.all(T_std[0, 1:] > 0)
+
+
+class TestBootstrapExtra:
+    def test_chsh_samples_present(self):
+        from tanglement.quantum import bell_state, generate_data, chsh_settings
+        from tanglement.inference import BayesianBootstrap
+        data = generate_data(bell_state('phi_plus'), chsh_settings(), 1000,
+                             rng=np.random.default_rng(42))
+        r = BayesianBootstrap().fit(data, n_samples=5000)
+        assert 'chsh_samples' in r.extra
+        assert len(r.extra['chsh_samples']) == 5000

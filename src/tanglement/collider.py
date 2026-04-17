@@ -18,9 +18,11 @@ correctly propagates ratio-estimator uncertainty.
 """
 
 import numpy as np
-from typing import Dict, Optional
+from typing import Dict
 from .quantum import fano_decomposition
 from .inference import _corr_summary, _chsh_horodecki, PosteriorResult
+
+__all__ = ["ColliderSimulator", "ColliderBayesian"]
 
 
 class ColliderSimulator:
@@ -50,7 +52,8 @@ class ColliderSimulator:
 
     def generate(self, rho, n_events, rng=None):
         """Accept-reject sampling. Returns (cos_t1, phi1, cos_t2, phi2)."""
-        if rng is None: rng = np.random.default_rng(42)
+        if rng is None:
+            rng = np.random.default_rng(42)
         T = fano_decomposition(rho)
         max_p = (1 + np.sum(np.abs(T))) / (16 * np.pi**2)
 
@@ -103,7 +106,8 @@ class ColliderBayesian:
     """
 
     def fit(self, collider_data: Dict, n_posterior=8000, rng=None):
-        if rng is None: rng = np.random.default_rng(123)
+        if rng is None:
+            rng = np.random.default_rng(123)
 
         B = collider_data['basis_data']
         w = collider_data['weights']
