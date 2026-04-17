@@ -17,36 +17,41 @@ from typing import Dict, Optional, Tuple
 from .quantum import ExperimentData, bloch_vector, rho_from_fano
 from .dag import BellDAG
 
+__all__ = [
+    "PosteriorResult",
+    "HypothesisTestResult",
+    "BinaryConjugate",
+    "BayesianBootstrap",
+    "Tomographic",
+    "BalkePearl",
+    "PhysicalTomographic",
+    "FrequentistBellTest",
+]
 
-__all__ = ["PosteriorResult", "BinaryConjugate", "BayesianBootstrap",
-           "Tomographic", "BalkePearl"]
 
 # ─── Common output ────────────────────────────────────────────────────
 
 @dataclass
 class PosteriorResult:
-    """
-    Unified output from all inference models.
+    """Unified output from all inference models.
 
     Attributes
     ----------
-    correlations : dict
-        Mapping setting index *k* to summary dict with keys
-        ``mean``, ``std``, ``ci``, and optionally ``true`` and ``covered``.
-    chsh : dict
-        CHSH summary with ``mean``, ``std``, ``ci``, ``P_violates``.
-    extra : dict
-        Model-specific extras (e.g. posterior samples, Fano matrices).
-    idata : object or None
-        ArviZ InferenceData for PyMC-based models, else ``None``.
+    correlations : dict mapping setting index to posterior summary
+        Each value has keys: mean, std, ci, and optionally true, covered.
+    chsh : dict with keys mean, std, ci, P_violates
+        Posterior summary of max|S| across the four CHSH combinations.
+    extra : dict of model-specific outputs (always includes chsh_samples)
+    idata : ArviZ InferenceData, present only for PyMC-based models
     """
-    correlations: Dict[int, Dict]       # k -> {mean, std, ci, true}
-    chsh: Dict                          # {mean, std, ci, P_violates}
-    extra: Dict                         # model-specific extras
-    idata: Optional[object] = None      # ArviZ InferenceData (PyMC models)
+    correlations: Dict[int, Dict]
+    chsh: Dict
+    extra: Dict
+    idata: Optional[object] = None
 
 
-def _corr_summary(samples: np.ndarray, true: Optional[float] = None) -> Dict:
+def _corr_summary(samples: np.ndarray,
+                   true: Optional[float] = None) -> Dict:
     """Compute posterior summary statistics from an array of samples."""
     d = {'mean': float(np.mean(samples)), 'std': float(np.std(samples)),
          'ci': (float(np.percentile(samples, 2.5)),
@@ -57,7 +62,9 @@ def _corr_summary(samples: np.ndarray, true: Optional[float] = None) -> Dict:
     return d
 
 
-def _chsh_from_4corr(c0: np.ndarray, c1: np.ndarray, c2: np.ndarray, c3: np.ndarray) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+def _chsh_from_4corr(c0: np.ndarray, c1: np.ndarray,
+                      c2: np.ndarray, c3: np.ndarray
+                      ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
     """Compute CHSH posterior samples from 4 correlation sample arrays."""
     combs = {'S1': c0+c1+c2-c3, 'S2': c0+c1-c2+c3,
              'S3': c0-c1+c2+c3, 'S4': -c0+c1+c2+c3}
@@ -261,14 +268,12 @@ class Tomographic:
         # CHSH via Horodecki
         chsh_s = _chsh_horodecki(C_samp)
 
-        # Build Fano matrix from posterior mean
+        # Build Fano matrix statistics from posterior
         T_mean = np.zeros((4, 4))
+        T_std = np.zeros((4, 4))
         T_mean[0, 0] = 1.0
         T_mean[1:, 1:] = np.mean(C_samp, axis=0)
-
-        T_std = np.zeros((4, 4))
         T_std[1:, 1:] = np.std(C_samp, axis=0)
-
         if obs_a is not None:
             ta_post = idata.posterior['t_a'].values.reshape(-1, 3)
             tb_post = idata.posterior['t_b'].values.reshape(-1, 3)
@@ -371,3 +376,330 @@ class BalkePearl:
             },
             idata=idata,
         )
+
+
+def _cholesky_to_rho(L_real: np.ndarray, L_imag: np.ndarray) -> np.ndarray:
+    """Reconstruct a physical density matrix from Cholesky parameters.
+
+    L is a 4x4 lower-triangular matrix with 10 real and 6 imaginary
+    free parameters. rho = L @ L.conj().T / Tr[L @ L.conj().T].
+    """
+    L = np.zeros((4, 4), dtype=complex)
+    # Diagonal (real only): indices 0..3
+    L[0, 0] = L_real[0]
+    L[1, 1] = L_real[1]
+    L[2, 2] = L_real[2]
+    L[3, 3] = L_real[3]
+    # Below-diagonal: real indices 4..9, imag indices 0..5
+    L[1, 0] = L_real[4] + 1j * L_imag[0]
+    L[2, 0] = L_real[5] + 1j * L_imag[1]
+    L[2, 1] = L_real[6] + 1j * L_imag[2]
+    L[3, 0] = L_real[7] + 1j * L_imag[3]
+    L[3, 1] = L_real[8] + 1j * L_imag[4]
+    L[3, 2] = L_real[9] + 1j * L_imag[5]
+
+    rho = L @ L.conj().T
+    tr = np.real(np.trace(rho))
+    return rho / tr if tr > 1e-15 else np.eye(4, dtype=complex) / 4
+
+
+def _rho_to_cholesky_init(rho: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Extract Cholesky parameters from a density matrix for initialisation."""
+    from .quantum import project_to_physical
+    rho_phys = project_to_physical(rho)
+    try:
+        L = np.linalg.cholesky(rho_phys)
+    except np.linalg.LinAlgError:
+        L = np.eye(4, dtype=complex) * 0.5
+
+    L_real = np.array([
+        np.real(L[0, 0]), np.real(L[1, 1]),
+        np.real(L[2, 2]), np.real(L[3, 3]),
+        np.real(L[1, 0]), np.real(L[2, 0]),
+        np.real(L[2, 1]), np.real(L[3, 0]),
+        np.real(L[3, 1]), np.real(L[3, 2]),
+    ])
+    L_imag = np.array([
+        np.imag(L[1, 0]), np.imag(L[2, 0]),
+        np.imag(L[2, 1]), np.imag(L[3, 0]),
+        np.imag(L[3, 1]), np.imag(L[3, 2]),
+    ])
+    return L_real, L_imag
+
+
+# ─── Model 5: Physical tomographic (Fano + physical projection) ─────
+
+class PhysicalTomographic:
+    """Full quantum state tomography with physical density matrix reconstruction.
+
+    Delegates Fano-coefficient inference to Tomographic (PyMC NUTS),
+    then reconstructs a physical density matrix for each posterior sample
+    via eigenvalue projection (clip negatives, renormalise). Computes
+    posterior distributions over concurrence, negativity, entanglement
+    of formation, purity, and eigenvalues.
+
+    Requires >= 9 tomographic settings ({X,Y,Z} x {X,Y,Z}).
+
+    Parameters
+    ----------
+    sigma_prior : prior std on Fano coefficients (passed to Tomographic)
+    purity_beta : strength of purity soft constraint (passed to Tomographic)
+    fit_bloch : whether to fit Bloch vectors from marginals
+    """
+
+    def __init__(self, sigma_prior: float = 2.0, purity_beta: float = 50.0,
+                 fit_bloch: bool = True):
+        self.sigma_prior = sigma_prior
+        self.beta = purity_beta
+        self.fit_bloch = fit_bloch
+
+    def fit(self, data: ExperimentData,
+            n_draws: int = 1500, n_tune: int = 1000,
+            n_chains: int = 2, seed: int = 42) -> PosteriorResult:
+
+        from .quantum import (
+            fano_decomposition, concurrence, negativity,
+            entanglement_of_formation, project_to_physical,
+        )
+
+        settings = data.setting_pairs
+        n_set = len(settings)
+        if n_set < 9:
+            raise ValueError(
+                f"PhysicalTomographic requires >= 9 settings, got {n_set}")
+
+        # Delegate Fano inference to Tomographic
+        tomo = Tomographic(sigma_prior=self.sigma_prior,
+                           purity_beta=self.beta,
+                           fit_bloch=self.fit_bloch)
+        tomo_result = tomo.fit(data, n_draws=n_draws, n_tune=n_tune,
+                               n_chains=n_chains, seed=seed)
+
+        # Reconstruct physical ρ for each posterior Fano sample
+        idata = tomo_result.idata
+        tc_post = idata.posterior['t_corr'].values.reshape(-1, 9)
+        ns = tc_post.shape[0]
+
+        has_bloch = 't_a' in idata.posterior
+        if has_bloch:
+            ta_post = idata.posterior['t_a'].values.reshape(-1, 3)
+            tb_post = idata.posterior['t_b'].values.reshape(-1, 3)
+
+        rho_samples = np.zeros((ns, 4, 4), dtype=complex)
+        eig_samples = np.zeros((ns, 4))
+        conc_samples = np.zeros(ns)
+        neg_samples = np.zeros(ns)
+        eof_samples = np.zeros(ns)
+        purity_samples = np.zeros(ns)
+
+        for s in range(ns):
+            T = np.zeros((4, 4))
+            T[0, 0] = 1.0
+            T[1:, 1:] = tc_post[s].reshape(3, 3)
+            if has_bloch:
+                T[1:, 0] = ta_post[s]
+                T[0, 1:] = tb_post[s]
+
+            rho_s = project_to_physical(rho_from_fano(T))
+            rho_samples[s] = rho_s
+            eig_samples[s] = np.sort(np.real(np.linalg.eigvalsh(rho_s)))[::-1]
+            conc_samples[s] = concurrence(rho_s)
+            neg_samples[s] = negativity(rho_s)
+            eof_samples[s] = entanglement_of_formation(rho_s)
+            purity_samples[s] = float(np.real(np.trace(rho_s @ rho_s)))
+
+        rho_mean = np.mean(rho_samples, axis=0)
+        T_mean = np.real(fano_decomposition(rho_mean))
+
+        # CHSH via Horodecki on the raw correlation tensor
+        C_samp = tc_post.reshape(-1, 3, 3)
+        chsh_s = _chsh_horodecki(C_samp)
+
+        return PosteriorResult(
+            correlations=tomo_result.correlations,
+            chsh=_corr_summary(chsh_s) | {'P_violates': float(np.mean(chsh_s > 2))},
+            extra={
+                'rho_mean': rho_mean,
+                'rho_samples': rho_samples,
+                'T_mean': T_mean,
+                'eigenvalues': _corr_summary(eig_samples[:, 0]),
+                'eigenvalue_samples': eig_samples,
+                'concurrence': _corr_summary(conc_samples),
+                'concurrence_samples': conc_samples,
+                'negativity': _corr_summary(neg_samples),
+                'negativity_samples': neg_samples,
+                'eof': _corr_summary(eof_samples),
+                'eof_samples': eof_samples,
+                'purity': _corr_summary(purity_samples),
+                'purity_samples': purity_samples,
+                'chsh_samples': chsh_s,
+            },
+            idata=idata,
+        )
+
+
+# ─── Model 6: Frequentist Bell test ─────────────────────────────────
+
+@dataclass
+class HypothesisTestResult:
+    """Output from FrequentistBellTest.
+
+    Attributes
+    ----------
+    test_statistic : observed max|S| across the four CHSH combinations
+    p_value : P(T >= t_obs | H0), where H0 is local realism
+    reject_h0 : whether p_value < alpha
+    alpha : significance level used
+    method : 'asymptotic' or 'bootstrap'
+    observed_S : dict of all four CHSH combination values
+    se_S : standard errors for each combination
+    ci : confidence interval for max|S|
+    nearest_local : closest point in the local polytope to the observed correlations
+    """
+    test_statistic: float
+    p_value: float
+    reject_h0: bool
+    alpha: float
+    method: str
+    observed_S: Dict[str, float]
+    se_S: Dict[str, float]
+    ci: Tuple[float, float]
+    nearest_local: Optional[np.ndarray]
+
+
+class FrequentistBellTest:
+    """Classical hypothesis test for Bell-CHSH violation.
+
+    H₀: The correlation vector lies in the local-realist polytope (|S| ≤ 2).
+    H₁: The correlation vector lies outside the local polytope.
+
+    Two methods:
+      - 'asymptotic': Gaussian approximation for the CHSH statistic
+      - 'bootstrap': Parametric bootstrap under the nearest H₀ point
+    """
+
+    def __init__(self, alpha: float = 0.05):
+        self.alpha = alpha
+
+    def test(self, data: ExperimentData, method: str = 'asymptotic',
+             n_bootstrap: int = 10000,
+             rng: Optional[np.random.Generator] = None) -> HypothesisTestResult:
+        """Run the hypothesis test.
+
+        Parameters
+        ----------
+        data : Bell experiment data (>= 4 settings required)
+        method : 'asymptotic' (Gaussian) or 'bootstrap' (parametric)
+        n_bootstrap : number of bootstrap replicates (only used if method='bootstrap')
+        rng : numpy random generator
+
+        Returns
+        -------
+        HypothesisTestResult
+        """
+        if rng is None:
+            rng = np.random.default_rng(42)
+
+        n_set = len(data.setting_pairs)
+        if n_set < 4:
+            raise ValueError("Need >= 4 settings for CHSH test")
+
+        # Compute sample correlations and variances per setting
+        E_hat = np.zeros(4)
+        Var_hat = np.zeros(4)
+        n_counts = np.zeros(4, dtype=int)
+        for k in range(4):
+            mask = data.setting_indices == k
+            prods = data.outcomes_x[mask] * data.outcomes_y[mask]
+            n_k = len(prods)
+            n_counts[k] = n_k
+            E_hat[k] = np.mean(prods)
+            Var_hat[k] = np.var(prods, ddof=1) / n_k
+
+        # All 4 CHSH combinations
+        coeffs = np.array([
+            [1,  1,  1, -1],   # S1
+            [1,  1, -1,  1],   # S2
+            [1, -1,  1,  1],   # S3
+            [-1, 1,  1,  1],   # S4
+        ], dtype=float)
+        S_hat = coeffs @ E_hat
+        S_var = coeffs**2 @ Var_hat
+        S_se = np.sqrt(S_var)
+
+        observed_S = {f'S{i+1}': float(S_hat[i]) for i in range(4)}
+        se_S = {f'S{i+1}': float(S_se[i]) for i in range(4)}
+
+        # Test statistic: max|Ŝᵢ|
+        best_idx = np.argmax(np.abs(S_hat))
+        t_obs = float(np.abs(S_hat[best_idx]))
+
+        # Nearest point in local polytope
+        from .polytope import nearest_local_point
+        c_local = nearest_local_point(E_hat)
+
+        if method == 'asymptotic':
+            p_value, ci = self._asymptotic(S_hat, S_se, t_obs, best_idx)
+        elif method == 'bootstrap':
+            p_value, ci = self._bootstrap(data, c_local, n_bootstrap, t_obs, rng)
+        else:
+            raise ValueError(f"method must be 'asymptotic' or 'bootstrap', "
+                             f"got '{method}'")
+
+        return HypothesisTestResult(
+            test_statistic=t_obs,
+            p_value=p_value,
+            reject_h0=p_value < self.alpha,
+            alpha=self.alpha,
+            method=method,
+            observed_S=observed_S,
+            se_S=se_S,
+            ci=ci,
+            nearest_local=c_local,
+        )
+
+    def _asymptotic(self, S_hat, S_se, t_obs, best_idx):
+        """Asymptotic Gaussian p-value.
+
+        Under H₀, the true |S| ≤ 2. The least-favorable null is |S| = 2.
+        Z = (|Ŝ| - 2) / σ_S, one-sided p = 1 - Φ(Z).
+        """
+        from scipy.stats import norm
+        se = S_se[best_idx]
+        if se < 1e-15:
+            p_value = 0.0 if t_obs > 2 else 1.0
+        else:
+            z = (t_obs - 2.0) / se
+            p_value = float(norm.sf(z))
+        ci = (float(t_obs - 1.96 * se), float(t_obs + 1.96 * se))
+        return p_value, ci
+
+    def _bootstrap(self, data, c_local, n_bootstrap, t_obs, rng):
+        """Parametric bootstrap under the nearest local-realist point.
+
+        Simulates data from H₀ (using c_local as the generating
+        correlation vector), computes the null distribution of max|S|,
+        returns the bootstrap p-value.
+        """
+        n_per = data.n_per_setting
+
+        boot_stats = np.zeros(n_bootstrap)
+        for b in range(n_bootstrap):
+            E_boot = np.zeros(4)
+            for k in range(4):
+                p_same = (1 + c_local[k]) / 2  # P(outcomes agree)
+                n_same = rng.binomial(n_per, np.clip(p_same, 0, 1))
+                E_boot[k] = (2 * n_same - n_per) / n_per
+
+            S_boot = np.array([
+                E_boot[0] + E_boot[1] + E_boot[2] - E_boot[3],
+                E_boot[0] + E_boot[1] - E_boot[2] + E_boot[3],
+                E_boot[0] - E_boot[1] + E_boot[2] + E_boot[3],
+                -E_boot[0] + E_boot[1] + E_boot[2] + E_boot[3],
+            ])
+            boot_stats[b] = np.max(np.abs(S_boot))
+
+        p_value = float(np.mean(boot_stats >= t_obs))
+        ci = (float(np.percentile(boot_stats, 2.5)),
+              float(np.percentile(boot_stats, 97.5)))
+        return p_value, ci

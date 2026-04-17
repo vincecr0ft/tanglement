@@ -2,7 +2,7 @@
 
 **Bayesian DAG inference for quantum entanglement detection.**
 
-[![CI](https://github.com/tanglement/tanglement/actions/workflows/ci.yml/badge.svg)](https://github.com/tanglement/tanglement/actions)
+[![CI](https://github.com/vincecr0ft/tanglement/actions/workflows/ci.yml/badge.svg)](https://github.com/vincecr0ft/tanglement/actions)
 [![PyPI](https://img.shields.io/pypi/v/tanglement)](https://pypi.org/project/tanglement/)
 
 ---

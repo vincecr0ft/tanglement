@@ -7,14 +7,6 @@ import numpy as np
 from typing import Dict, Tuple, List, Optional
 from dataclasses import dataclass
 
-# Pauli matrices
-I2 = np.eye(2, dtype=complex)
-σ_x = np.array([[0, 1], [1, 0]], dtype=complex)
-σ_y = np.array([[0, -1j], [1j, 0]], dtype=complex)
-σ_z = np.array([[1, 0], [0, -1]], dtype=complex)
-PAULI = [I2, σ_x, σ_y, σ_z]
-PAULI_LABELS = ['I', 'X', 'Y', 'Z']
-
 __all__ = [
     "bell_state",
     "werner_state",
@@ -25,11 +17,24 @@ __all__ = [
     "quantum_expectation",
     "outcome_probabilities",
     "horodecki_smax",
+    "partial_transpose",
+    "negativity",
+    "concurrence",
+    "entanglement_of_formation",
+    "project_to_physical",
     "ExperimentData",
     "generate_data",
     "chsh_settings",
     "tomographic_settings",
 ]
+
+# Pauli matrices
+I2 = np.eye(2, dtype=complex)
+σ_x = np.array([[0, 1], [1, 0]], dtype=complex)
+σ_y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+σ_z = np.array([[1, 0], [0, -1]], dtype=complex)
+PAULI = [I2, σ_x, σ_y, σ_z]
+PAULI_LABELS = ['I', 'X', 'Y', 'Z']
 
 # Bloch sphere direction labels → (θ, φ)
 DIRECTION_ANGLES = {
@@ -40,13 +45,11 @@ DIRECTION_ANGLES = {
 
 
 def bell_state(name: str = "phi_plus") -> np.ndarray:
-    """
-    4x4 density matrix for standard Bell states.
+    """Return the 4x4 density matrix for a standard Bell state.
 
     Parameters
     ----------
-    name : str
-        One of 'phi_plus', 'phi_minus', 'psi_plus', 'psi_minus'.
+    name : one of 'phi_plus', 'phi_minus', 'psi_plus', 'psi_minus'
 
     Raises
     ------
@@ -63,30 +66,28 @@ def bell_state(name: str = "phi_plus") -> np.ndarray:
     if name not in vecs:
         raise ValueError(
             f"Unknown Bell state '{name}'. "
-            f"Choose from {sorted(vecs.keys())}."
+            f"Choose from: {', '.join(sorted(vecs))}"
         )
     ψ = vecs[name]
     return np.outer(ψ, ψ.conj())
 
 
 def werner_state(p: float) -> np.ndarray:
-    """
-    Werner state: rho = p|Psi-><Psi-| + (1-p)I/4.
+    """Return the Werner state rho = p|Psi-><Psi-| + (1-p)I/4.
 
-    Violates CHSH for p > 1/sqrt(2).
+    Violates CHSH for p > 1/sqrt(2) ~ 0.707.
 
     Parameters
     ----------
-    p : float
-        Mixing parameter in [0, 1].
+    p : mixing parameter in [0, 1]
 
     Raises
     ------
     ValueError
         If *p* is outside [0, 1].
     """
-    if not (0.0 <= p <= 1.0):
-        raise ValueError(f"Mixing parameter p must be in [0, 1], got {p}.")
+    if not 0.0 <= p <= 1.0:
+        raise ValueError(f"p must be in [0, 1], got {p}")
     return p * bell_state("psi_minus") + (1 - p) * np.eye(4) / 4
 
 
@@ -156,6 +157,67 @@ def horodecki_smax(ρ: np.ndarray) -> float:
     return 2 * np.sqrt(max(eigs[0], 0) + max(eigs[1], 0))
 
 
+# ─── Entanglement measures ──────────────────────────────────────────
+
+def partial_transpose(ρ: np.ndarray) -> np.ndarray:
+    """Partial transpose ρ^{Γ_B} of a 4×4 two-qubit density matrix.
+
+    Reshapes to (2,2,2,2) indexed as (i_A, j_A, i_B, j_B), transposes
+    the B subsystem indices, then reshapes back to (4,4).
+    """
+    r = ρ.reshape(2, 2, 2, 2)
+    return r.transpose(0, 3, 2, 1).reshape(4, 4)
+
+
+def negativity(ρ: np.ndarray) -> float:
+    """Negativity N(ρ) = (||ρ^{Γ_B}||₁ - 1) / 2.
+
+    Equals zero for all separable states (PPT criterion).
+    """
+    eigs = np.linalg.eigvalsh(partial_transpose(ρ))
+    return float(np.sum(np.abs(eigs) - eigs) / 2)
+
+
+def concurrence(ρ: np.ndarray) -> float:
+    """Wootters concurrence C(ρ) = max(0, λ₁-λ₂-λ₃-λ₄).
+
+    λᵢ are the sorted (descending) square roots of the eigenvalues
+    of ρ·ρ̃, where ρ̃ = (σ_y⊗σ_y) ρ* (σ_y⊗σ_y).
+    """
+    sy_sy = np.kron(σ_y, σ_y)
+    rho_tilde = sy_sy @ ρ.conj() @ sy_sy
+    product = ρ @ rho_tilde
+    eigs = np.sort(np.real(np.linalg.eigvals(product)))[::-1]
+    lambdas = np.sqrt(np.maximum(eigs, 0.0))
+    return float(max(0.0, lambdas[0] - lambdas[1] - lambdas[2] - lambdas[3]))
+
+
+def entanglement_of_formation(ρ: np.ndarray) -> float:
+    """Entanglement of formation E_F(ρ) from the concurrence.
+
+    E_F = h((1 + √(1-C²))/2) where h is the binary entropy.
+    """
+    C = concurrence(ρ)
+    if C < 1e-15:
+        return 0.0
+    x = (1 + np.sqrt(1 - C**2)) / 2
+    return float(-x * np.log2(x) - (1 - x) * np.log2(1 - x))
+
+
+def project_to_physical(ρ: np.ndarray) -> np.ndarray:
+    """Project a Hermitian matrix onto the set of valid density matrices.
+
+    Clips negative eigenvalues to zero, renormalizes trace to 1.
+    """
+    ρ_herm = (ρ + ρ.conj().T) / 2
+    eigs, vecs = np.linalg.eigh(ρ_herm)
+    eigs = np.maximum(eigs, 0.0)
+    if eigs.sum() < 1e-15:
+        return np.eye(4, dtype=complex) / 4
+    eigs /= eigs.sum()
+    return (vecs * eigs) @ vecs.conj().T
+
+
 # ─── Data generation ─────────────────────────────────────────────────
 
 @dataclass
@@ -174,29 +236,24 @@ def generate_data(ρ: np.ndarray,
                   settings: List[Tuple[float, float, float, float]],
                   n_per_setting: int,
                   rng: Optional[np.random.Generator] = None) -> ExperimentData:
-    """
-    Sample binary +/-1 outcomes from quantum state across multiple settings.
+    """Sample binary +/-1 outcomes from a quantum state.
 
     Parameters
     ----------
-    rho : np.ndarray
-        4x4 density matrix.
-    settings : list of (theta_a, phi_a, theta_b, phi_b)
-        Measurement setting tuples.
-    n_per_setting : int
-        Number of samples per setting (must be >= 1).
-    rng : numpy Generator, optional
-        Random number generator.
+    rho : (4, 4) density matrix
+    settings : list of (theta_a, phi_a, theta_b, phi_b) measurement tuples
+    n_per_setting : number of measurement trials per setting pair
+    rng : numpy random generator (default: deterministic seed 42)
 
     Raises
     ------
     ValueError
-        If *settings* is empty or *n_per_setting* < 1.
+        If *n_per_setting* < 1 or *settings* is empty.
     """
-    if not settings:
-        raise ValueError("settings must be a non-empty list.")
     if n_per_setting < 1:
-        raise ValueError(f"n_per_setting must be >= 1, got {n_per_setting}.")
+        raise ValueError(f"n_per_setting must be >= 1, got {n_per_setting}")
+    if not settings:
+        raise ValueError("settings must be a non-empty list")
     if rng is None:
         rng = np.random.default_rng(42)
 

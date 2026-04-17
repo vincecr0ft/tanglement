@@ -26,14 +26,22 @@ from tanglement.quantum import (
     rho_from_fano,
     quantum_expectation,
     ExperimentData,
+    partial_transpose,
+    negativity,
+    concurrence,
+    entanglement_of_formation,
+    project_to_physical,
 )
 from tanglement.dag import BellDAG, NonlocalDAG, IVDAG
-from tanglement.polytope import chsh_values, in_local_polytope, npa_level1
+from tanglement.polytope import chsh_values, in_local_polytope, npa_level1, nearest_local_point
 from tanglement.inference import (
     BinaryConjugate,
     BayesianBootstrap,
     Tomographic,
     BalkePearl,
+    PhysicalTomographic,
+    FrequentistBellTest,
+    HypothesisTestResult,
     PosteriorResult,
 )
 from tanglement.collider import ColliderSimulator, ColliderBayesian
@@ -60,6 +68,11 @@ __all__ = [
     "rho_from_fano",
     "quantum_expectation",
     "ExperimentData",
+    "partial_transpose",
+    "negativity",
+    "concurrence",
+    "entanglement_of_formation",
+    "project_to_physical",
     # dag
     "BellDAG",
     "NonlocalDAG",
@@ -68,11 +81,15 @@ __all__ = [
     "chsh_values",
     "in_local_polytope",
     "npa_level1",
+    "nearest_local_point",
     # inference
     "BinaryConjugate",
     "BayesianBootstrap",
     "Tomographic",
     "BalkePearl",
+    "PhysicalTomographic",
+    "FrequentistBellTest",
+    "HypothesisTestResult",
     "PosteriorResult",
     # collider
     "ColliderSimulator",
@@ -84,6 +101,6 @@ __all__ = [
     "entanglement_witness_from_correlations",
     "simulate_esr_spectrum",
     "SpectralFanoExtractor",
-    # spectral_comparison
+    # spectral comparison
     "SpectralModelComparison",
 ]

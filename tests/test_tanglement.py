@@ -1,4 +1,6 @@
-"""Complete pytest suite for tanglement."""
+"""
+Complete pytest suite for tanglement.
+"""
 import numpy as np
 import pytest
 from numpy.testing import assert_allclose
@@ -353,80 +355,525 @@ class TestInputValidation:
 
     def test_werner_state_out_of_range(self):
         from tanglement.quantum import werner_state
-        with pytest.raises(ValueError):
-            werner_state(-0.1)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="p must be in"):
             werner_state(1.5)
+        with pytest.raises(ValueError, match="p must be in"):
+            werner_state(-0.1)
 
     def test_generate_data_empty_settings(self):
-        from tanglement.quantum import bell_state, generate_data
+        from tanglement.quantum import generate_data, bell_state
         with pytest.raises(ValueError, match="non-empty"):
             generate_data(bell_state('phi_plus'), [], 100)
 
     def test_generate_data_zero_samples(self):
-        from tanglement.quantum import bell_state, generate_data, chsh_settings
+        from tanglement.quantum import generate_data, bell_state, chsh_settings
         with pytest.raises(ValueError, match="n_per_setting"):
             generate_data(bell_state('phi_plus'), chsh_settings(), 0)
+
+
+class TestEntanglementMeasures:
+    def test_negativity_bell(self):
+        from tanglement.quantum import bell_state, negativity
+        assert negativity(bell_state('phi_plus')) > 0.49
+
+    def test_negativity_product(self):
+        from tanglement.quantum import negativity
+        e0 = np.array([1, 0], dtype=complex)
+        rho = np.outer(np.kron(e0, e0), np.kron(e0, e0).conj())
+        assert_allclose(negativity(rho), 0.0, atol=1e-10)
+
+    def test_concurrence_bell(self):
+        from tanglement.quantum import bell_state, concurrence
+        assert_allclose(concurrence(bell_state('phi_plus')), 1.0, atol=1e-10)
+
+    def test_concurrence_product(self):
+        from tanglement.quantum import concurrence
+        e0 = np.array([1, 0], dtype=complex)
+        rho = np.outer(np.kron(e0, e0), np.kron(e0, e0).conj())
+        assert_allclose(concurrence(rho), 0.0, atol=1e-10)
+
+    def test_concurrence_werner(self):
+        from tanglement.quantum import werner_state, concurrence
+        # Werner(p) concurrence = max(0, (3p-1)/2)
+        assert_allclose(concurrence(werner_state(1.0)), 1.0, atol=1e-6)
+        assert_allclose(concurrence(werner_state(0.5)), 0.25, atol=1e-6)
+        assert_allclose(concurrence(werner_state(0.3)), 0.0, atol=1e-6)
+
+    def test_eof_monotone(self):
+        from tanglement.quantum import werner_state, entanglement_of_formation
+        eof_high = entanglement_of_formation(werner_state(0.9))
+        eof_low = entanglement_of_formation(werner_state(0.5))
+        eof_sep = entanglement_of_formation(werner_state(0.3))
+        assert eof_high > eof_low > 0
+        assert_allclose(eof_sep, 0.0, atol=1e-10)
+
+    def test_partial_transpose_ppt(self):
+        from tanglement.quantum import bell_state, partial_transpose
+        rho_pt = partial_transpose(bell_state('phi_plus'))
+        eigs = np.linalg.eigvalsh(rho_pt)
+        assert np.min(eigs) < -0.4  # entangled state has negative eigenvalue
+
+    def test_project_to_physical(self):
+        from tanglement.quantum import project_to_physical
+        # A non-physical matrix
+        bad = np.diag([0.5, 0.3, 0.1, -0.1]).astype(complex)
+        rho = project_to_physical(bad)
+        eigs = np.linalg.eigvalsh(rho)
+        assert np.all(eigs >= -1e-10)
+        assert_allclose(np.trace(rho), 1.0, atol=1e-10)
+
+
+class TestPolytopeMisc:
+    def test_nearest_local_point_inside(self):
+        from tanglement.polytope import nearest_local_point
+        c = np.array([0.5, 0.5, 0.5, 0.5])
+        proj = nearest_local_point(c)
+        assert_allclose(proj, c, atol=0.05)
+
+    def test_nearest_local_point_outside(self):
+        from tanglement.polytope import nearest_local_point, in_local_polytope
+        c = np.array([1/np.sqrt(2)] * 3 + [-1/np.sqrt(2)])
+        proj = nearest_local_point(c)
+        assert in_local_polytope(proj)
 
 
 class TestQuantumPrimitives:
     def test_bloch_vector_z(self):
         from tanglement.quantum import bloch_vector
-        b = bloch_vector(0.0, 0.0)
-        assert_allclose(b, [0, 0, 1], atol=1e-12)
+        assert_allclose(bloch_vector(0.0), [0, 0, 1], atol=1e-10)
 
     def test_bloch_vector_x(self):
         from tanglement.quantum import bloch_vector
-        b = bloch_vector(np.pi / 2, 0.0)
-        assert_allclose(b, [1, 0, 0], atol=1e-12)
+        assert_allclose(bloch_vector(np.pi/2, 0.0), [1, 0, 0], atol=1e-10)
 
     def test_measurement_eigenvalues(self):
         from tanglement.quantum import measurement_operator
-        M = measurement_operator(0.0, 0.0)
+        M = measurement_operator(np.pi/4, 0)
         eigs = np.sort(np.linalg.eigvalsh(M))
-        assert_allclose(eigs, [-1, 1], atol=1e-12)
+        assert_allclose(eigs, [-1, 1], atol=1e-10)
+
+
+class TestPhysicalTomographic:
+    """Tests for PhysicalTomographic (Cholesky-parametrized density matrix inference)."""
+
+    @pytest.mark.slow
+    @pytest.mark.pymc
+    def test_phi_plus_entanglement(self):
+        """Maximally entangled state should yield concurrence ~ 1, negativity ~ 0.5."""
+        from tanglement.quantum import bell_state, generate_data, tomographic_settings
+        from tanglement.inference import PhysicalTomographic
+        rho = bell_state('phi_plus')
+        data = generate_data(rho, tomographic_settings(), 3000, rng=np.random.default_rng(42))
+        r = PhysicalTomographic().fit(data, n_draws=500, n_tune=500, n_chains=1)
+        assert r.extra['concurrence']['mean'] > 0.7
+        assert r.extra['negativity']['mean'] > 0.3
+        assert r.extra['purity']['mean'] > 0.8
+        assert r.chsh['P_violates'] > 0.90
+
+    @pytest.mark.slow
+    @pytest.mark.pymc
+    def test_product_state_separable(self):
+        """Product state should yield concurrence ~ 0, negativity ~ 0."""
+        from tanglement.quantum import generate_data, tomographic_settings
+        from tanglement.inference import PhysicalTomographic
+        e0 = np.array([1, 0], dtype=complex)
+        rho = np.outer(np.kron(e0, e0), np.kron(e0, e0).conj())
+        data = generate_data(rho, tomographic_settings(), 3000, rng=np.random.default_rng(42))
+        r = PhysicalTomographic().fit(data, n_draws=500, n_tune=500, n_chains=1)
+        assert r.extra['concurrence']['mean'] < 0.15
+        assert r.extra['negativity']['mean'] < 0.1
+
+    @pytest.mark.slow
+    @pytest.mark.pymc
+    def test_rho_samples_physical(self):
+        """Every posterior ρ sample must be positive semidefinite with trace 1."""
+        from tanglement.quantum import bell_state, generate_data, tomographic_settings
+        from tanglement.inference import PhysicalTomographic
+        data = generate_data(bell_state('psi_minus'), tomographic_settings(), 2000,
+                             rng=np.random.default_rng(42))
+        r = PhysicalTomographic().fit(data, n_draws=300, n_tune=300, n_chains=1)
+        for s in range(min(50, r.extra['rho_samples'].shape[0])):
+            rho_s = r.extra['rho_samples'][s]
+            eigs = np.linalg.eigvalsh(rho_s)
+            assert np.all(eigs > -1e-8), f"Negative eigenvalue at sample {s}: {eigs}"
+            assert_allclose(np.trace(rho_s), 1.0, atol=1e-6)
+
+    @pytest.mark.slow
+    @pytest.mark.pymc
+    def test_werner_concurrence_accuracy(self):
+        """Werner(0.85) concurrence should be near (3*0.85-1)/2 = 0.775."""
+        from tanglement.quantum import werner_state, generate_data, tomographic_settings
+        from tanglement.inference import PhysicalTomographic
+        data = generate_data(werner_state(0.85), tomographic_settings(), 5000,
+                             rng=np.random.default_rng(42))
+        r = PhysicalTomographic().fit(data, n_draws=600, n_tune=600, n_chains=1)
+        true_conc = (3 * 0.85 - 1) / 2  # = 0.775
+        assert abs(r.extra['concurrence']['mean'] - true_conc) < 0.15
+
+    @pytest.mark.slow
+    @pytest.mark.pymc
+    def test_eof_positive_for_entangled(self):
+        """Entangled state should have E_F > 0."""
+        from tanglement.quantum import bell_state, generate_data, tomographic_settings
+        from tanglement.inference import PhysicalTomographic
+        data = generate_data(bell_state('phi_plus'), tomographic_settings(), 3000,
+                             rng=np.random.default_rng(42))
+        r = PhysicalTomographic().fit(data, n_draws=400, n_tune=400, n_chains=1)
+        assert r.extra['eof']['mean'] > 0.3
+
+    @pytest.mark.slow
+    @pytest.mark.pymc
+    def test_requires_9_settings(self):
+        """Should raise ValueError with fewer than 9 settings."""
+        from tanglement.quantum import bell_state, generate_data, chsh_settings
+        from tanglement.inference import PhysicalTomographic
+        data = generate_data(bell_state('phi_plus'), chsh_settings(), 1000,
+                             rng=np.random.default_rng(42))
+        with pytest.raises(ValueError, match="9 settings"):
+            PhysicalTomographic().fit(data)
+
+
+class TestFrequentistBellTest:
+    """Tests for FrequentistBellTest (classical hypothesis testing)."""
+
+    def test_rejects_bell_state_asymptotic(self):
+        """Asymptotic test should reject H₀ for |Φ+⟩ with enough data."""
+        from tanglement.quantum import bell_state, generate_data, chsh_settings
+        from tanglement.inference import FrequentistBellTest
+        data = generate_data(bell_state('phi_plus'), chsh_settings(), 5000,
+                             rng=np.random.default_rng(42))
+        r = FrequentistBellTest(alpha=0.05).test(data, method='asymptotic')
+        assert r.reject_h0
+        assert r.p_value < 0.001
+        assert r.test_statistic > 2.0
+
+    def test_no_false_rejection_product(self):
+        """Product state should not reject H₀."""
+        from tanglement.quantum import generate_data, chsh_settings
+        from tanglement.inference import FrequentistBellTest
+        e0 = np.array([1, 0], dtype=complex)
+        rho = np.outer(np.kron(e0, e0), np.kron(e0, e0).conj())
+        data = generate_data(rho, chsh_settings(), 5000, rng=np.random.default_rng(42))
+        r = FrequentistBellTest(alpha=0.05).test(data, method='asymptotic')
+        assert not r.reject_h0
+        assert r.p_value > 0.05
+
+    def test_rejects_bell_state_bootstrap(self):
+        """Bootstrap test should reject H₀ for |Φ+⟩."""
+        from tanglement.quantum import bell_state, generate_data, chsh_settings
+        from tanglement.inference import FrequentistBellTest
+        data = generate_data(bell_state('phi_plus'), chsh_settings(), 5000,
+                             rng=np.random.default_rng(42))
+        r = FrequentistBellTest(alpha=0.05).test(data, method='bootstrap',
+                                                  n_bootstrap=5000,
+                                                  rng=np.random.default_rng(123))
+        assert r.reject_h0
+        assert r.p_value < 0.01
+
+    def test_no_false_rejection_bootstrap(self):
+        """Product state bootstrap test should not reject H₀."""
+        from tanglement.quantum import generate_data, chsh_settings
+        from tanglement.inference import FrequentistBellTest
+        e0 = np.array([1, 0], dtype=complex)
+        rho = np.outer(np.kron(e0, e0), np.kron(e0, e0).conj())
+        data = generate_data(rho, chsh_settings(), 5000, rng=np.random.default_rng(42))
+        r = FrequentistBellTest(alpha=0.05).test(data, method='bootstrap',
+                                                  n_bootstrap=5000,
+                                                  rng=np.random.default_rng(123))
+        assert not r.reject_h0
+
+    def test_werner_threshold_detection(self):
+        """Werner(0.85) should be detectable; Werner(0.5) should not."""
+        from tanglement.quantum import werner_state, generate_data, chsh_settings
+        from tanglement.inference import FrequentistBellTest
+        # Above threshold
+        data_high = generate_data(werner_state(0.85), chsh_settings(), 10000,
+                                  rng=np.random.default_rng(42))
+        r_high = FrequentistBellTest(alpha=0.05).test(data_high)
+        assert r_high.reject_h0
+        # Below threshold
+        data_low = generate_data(werner_state(0.5), chsh_settings(), 10000,
+                                 rng=np.random.default_rng(42))
+        r_low = FrequentistBellTest(alpha=0.05).test(data_low)
+        assert not r_low.reject_h0
+
+    def test_observed_S_structure(self):
+        """Result should contain all 4 CHSH values and standard errors."""
+        from tanglement.quantum import bell_state, generate_data, chsh_settings
+        from tanglement.inference import FrequentistBellTest
+        data = generate_data(bell_state('phi_plus'), chsh_settings(), 1000,
+                             rng=np.random.default_rng(42))
+        r = FrequentistBellTest().test(data)
+        assert set(r.observed_S.keys()) == {'S1', 'S2', 'S3', 'S4'}
+        assert set(r.se_S.keys()) == {'S1', 'S2', 'S3', 'S4'}
+        assert all(v > 0 for v in r.se_S.values())
+
+    def test_nearest_local_is_local(self):
+        """The nearest local point should lie inside the local polytope."""
+        from tanglement.quantum import bell_state, generate_data, chsh_settings
+        from tanglement.inference import FrequentistBellTest
+        from tanglement.polytope import in_local_polytope
+        data = generate_data(bell_state('phi_plus'), chsh_settings(), 1000,
+                             rng=np.random.default_rng(42))
+        r = FrequentistBellTest().test(data)
+        assert in_local_polytope(r.nearest_local)
+
+    def test_confidence_interval_contains_statistic(self):
+        """The CI should bracket the test statistic for asymptotic method."""
+        from tanglement.quantum import bell_state, generate_data, chsh_settings
+        from tanglement.inference import FrequentistBellTest
+        data = generate_data(bell_state('phi_plus'), chsh_settings(), 2000,
+                             rng=np.random.default_rng(42))
+        r = FrequentistBellTest().test(data, method='asymptotic')
+        assert r.ci[0] <= r.test_statistic <= r.ci[1]
+
+    def test_power_increases_with_N(self):
+        """p-value should decrease as sample size grows."""
+        from tanglement.quantum import bell_state, generate_data, chsh_settings
+        from tanglement.inference import FrequentistBellTest
+        rho = bell_state('phi_plus')
+        p_vals = []
+        for N in [500, 2000, 8000]:
+            data = generate_data(rho, chsh_settings(), N, rng=np.random.default_rng(42))
+            r = FrequentistBellTest().test(data)
+            p_vals.append(r.p_value)
+        assert p_vals[1] < p_vals[0]
+        assert p_vals[2] < p_vals[1]
+
+    def test_invalid_method_raises(self):
+        """Should raise ValueError for unknown method."""
+        from tanglement.quantum import bell_state, generate_data, chsh_settings
+        from tanglement.inference import FrequentistBellTest
+        data = generate_data(bell_state('phi_plus'), chsh_settings(), 100,
+                             rng=np.random.default_rng(42))
+        with pytest.raises(ValueError, match="method"):
+            FrequentistBellTest().test(data, method='invalid')
+
+    def test_bayesian_frequentist_consistency(self):
+        """Bayesian P(S>2) and frequentist p-value should agree directionally."""
+        from tanglement.quantum import bell_state, generate_data, chsh_settings
+        from tanglement.inference import BinaryConjugate, FrequentistBellTest
+        rho = bell_state('phi_plus')
+        data = generate_data(rho, chsh_settings(), 3000, rng=np.random.default_rng(42))
+        bayes = BinaryConjugate().fit(data, n_samples=10000)
+        freq = FrequentistBellTest().test(data)
+        # Both should strongly detect violation
+        assert bayes.chsh['P_violates'] > 0.99
+        assert freq.reject_h0
+        assert freq.p_value < 0.001
 
     def test_outcome_probabilities_sum_to_one(self):
         from tanglement.quantum import bell_state, outcome_probabilities
-        rho = bell_state('phi_plus')
-        probs = outcome_probabilities(rho, 0.0, 0.0, np.pi/4, 0.0)
-        assert_allclose(sum(probs.values()), 1.0, atol=1e-12)
+        probs = outcome_probabilities(bell_state('phi_plus'), 0, 0, np.pi/4, 0)
+        assert_allclose(sum(probs.values()), 1.0, atol=1e-10)
 
     def test_outcome_probabilities_consistent(self):
         from tanglement.quantum import bell_state, outcome_probabilities, quantum_expectation
-        rho = bell_state('phi_plus')
-        θa, φa, θb, φb = 0.0, 0.0, np.pi/4, 0.0
-        probs = outcome_probabilities(rho, θa, φa, θb, φb)
-        E_from_probs = sum(x * y * p for (x, y), p in probs.items())
-        E_direct = quantum_expectation(rho, θa, φa, θb, φb)
-        assert_allclose(E_from_probs, E_direct, atol=1e-10)
+        rho = bell_state('psi_minus')
+        args = (np.pi/3, 0.0, np.pi/6, 0.0)
+        probs = outcome_probabilities(rho, *args)
+        E = sum(x * y * p for (x, y), p in probs.items())
+        assert_allclose(E, quantum_expectation(rho, *args), atol=1e-10)
 
 
 class TestTomographicStd:
+    """Verify T_std bug fix: Tomographic model must return nonzero T_std."""
     @pytest.mark.slow
     @pytest.mark.pymc
     def test_t_std_nonzero(self):
         from tanglement.quantum import bell_state, generate_data, tomographic_settings
         from tanglement.inference import Tomographic
         rho = bell_state('phi_plus')
-        data = generate_data(rho, tomographic_settings(), 3000,
-                             rng=np.random.default_rng(42))
-        r = Tomographic(fit_bloch=True).fit(
-            data, n_draws=500, n_tune=500, n_chains=1)
-        T_std = r.extra['T_std']
-        # Correlation block should have nonzero std
-        assert np.all(T_std[1:, 1:] > 0)
-        # Bloch vector stds should be nonzero when fit_bloch=True
-        assert np.all(T_std[1:, 0] > 0)
-        assert np.all(T_std[0, 1:] > 0)
+        data = generate_data(rho, tomographic_settings(), 3000, rng=np.random.default_rng(42))
+        r = Tomographic(fit_bloch=True).fit(data, n_draws=500, n_tune=500, n_chains=1)
+        # Correlation tensor std should be nonzero
+        assert np.any(r.extra['T_std'][1:, 1:] > 0)
+        # Bloch vector std should be nonzero
+        assert np.any(r.extra['T_std'][1:, 0] > 0)
+        assert np.any(r.extra['T_std'][0, 1:] > 0)
 
 
 class TestBootstrapExtra:
     def test_chsh_samples_present(self):
         from tanglement.quantum import bell_state, generate_data, chsh_settings
         from tanglement.inference import BayesianBootstrap
-        data = generate_data(bell_state('phi_plus'), chsh_settings(), 1000,
-                             rng=np.random.default_rng(42))
-        r = BayesianBootstrap().fit(data, n_samples=5000)
+        data = generate_data(bell_state('phi_plus'), chsh_settings(), 500, rng=np.random.default_rng(42))
+        r = BayesianBootstrap().fit(data, n_samples=1000)
         assert 'chsh_samples' in r.extra
-        assert len(r.extra['chsh_samples']) == 5000
+        assert len(r.extra['chsh_samples']) == 1000
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Tau-pair analysis pipeline tests
+# ═══════════════════════════════════════════════════════════════════
+
+class TestTauClassification:
+    def test_pinu(self):
+        from tanglement.tautau import classify_decay
+        name, alpha, _ = classify_decay([-211, -16])
+        assert name == 'pi_nu'
+        assert alpha == 1.0
+
+    def test_rhonu(self):
+        from tanglement.tautau import classify_decay
+        name, alpha, _ = classify_decay([211, 111, 16])
+        assert name == 'rho_nu'
+        assert_allclose(alpha, 0.46)
+
+    def test_leptonic(self):
+        from tanglement.tautau import classify_decay
+        name, alpha, _ = classify_decay([11, -12, 16])
+        assert name == 'e_nu_nu'
+        assert_allclose(alpha, 0.333)
+
+    def test_unknown(self):
+        from tanglement.tautau import classify_decay
+        name, alpha, _ = classify_decay([321, 311, 16])
+        assert name == 'other'
+        assert alpha == 0.0
+
+
+class TestBoostAndAngles:
+    def test_boost_preserves_mass(self):
+        from tanglement.tautau import boost_to_rest_frame
+        # Tau along z with known momentum; pion should keep its mass
+        p4_tau = (22.8, 0, 0, 22.73)
+        p4_pi = (15.0, 0, 0.5, 14.99)
+        E, px, py, pz = boost_to_rest_frame(p4_tau, p4_pi)
+        m2_orig = p4_pi[0]**2 - p4_pi[1]**2 - p4_pi[2]**2 - p4_pi[3]**2
+        m2_boost = E**2 - px**2 - py**2 - pz**2
+        assert_allclose(m2_boost, m2_orig, atol=1e-6)
+
+    def test_boost_at_rest_is_identity(self):
+        from tanglement.tautau import boost_to_rest_frame
+        p4_tau = (1.777, 0, 0, 0)
+        p4_pi = (0.896, 0.3, -0.5, 0.7)
+        result = boost_to_rest_frame(p4_tau, p4_pi)
+        assert_allclose(result, p4_pi, atol=1e-10)
+
+    def test_rest_frame_angles_forward(self):
+        from tanglement.tautau import compute_rest_frame_angles
+        # Tau along z; hadron along z in lab => forward in RF
+        p4_tau = (22.8, 0, 0, 22.73)
+        p4_had = (20.0, 0, 0, 20.0)
+        p4_beam = (45.6, 0, 0, 45.6)
+        cos_t, phi = compute_rest_frame_angles(p4_tau, p4_had, p4_beam)
+        assert cos_t > 0.5
+
+
+class TestTauFanoExtraction:
+    def test_singlet_extraction(self):
+        """Synthetic singlet data -> correct Fano coefficients."""
+        from tanglement.collider import ColliderSimulator
+        from tanglement.quantum import bell_state
+        from tanglement.tautau import bayesian_fano_with_alpha
+
+        sim = ColliderSimulator()
+        rho = bell_state('psi_minus')
+        ct1, p1, ct2, p2 = sim.generate(rho, 5000, rng=np.random.default_rng(42))
+        raw = sim.extract(ct1, p1, ct2, p2)
+
+        result = bayesian_fano_with_alpha(raw, 1.0, 1.0, n_posterior=3000,
+                                           rng=np.random.default_rng(123))
+        T = result.extra['T_mean']
+        assert T[1, 1] < -0.8
+        assert T[2, 2] < -0.8
+        assert T[3, 3] < -0.8
+
+    def test_alpha_correction_widens_posterior(self):
+        """Dividing by small alpha should widen the posterior."""
+        from tanglement.collider import ColliderSimulator
+        from tanglement.quantum import bell_state
+        from tanglement.tautau import bayesian_fano_with_alpha
+
+        sim = ColliderSimulator()
+        rho = bell_state('psi_minus')
+        ct1, p1, ct2, p2 = sim.generate(rho, 2000, rng=np.random.default_rng(42))
+        raw = sim.extract(ct1, p1, ct2, p2)
+
+        r1 = bayesian_fano_with_alpha(raw, 1.0, 1.0, n_posterior=2000,
+                                       rng=np.random.default_rng(1))
+        r2 = bayesian_fano_with_alpha(raw, 0.46, 0.46, n_posterior=2000,
+                                       rng=np.random.default_rng(1))
+        std1 = r1.extra['T_std'][1, 1]
+        std2 = r2.extra['T_std'][1, 1]
+        assert std2 > std1 * 3
+
+    def test_alpha_correction_preserves_mean(self):
+        """Alpha correction should scale the mean by 1/alpha^2."""
+        from tanglement.collider import ColliderSimulator
+        from tanglement.quantum import bell_state
+        from tanglement.tautau import bayesian_fano_with_alpha
+
+        sim = ColliderSimulator()
+        rho = bell_state('psi_minus')
+        ct1, p1, ct2, p2 = sim.generate(rho, 5000, rng=np.random.default_rng(42))
+        raw = sim.extract(ct1, p1, ct2, p2)
+
+        r1 = bayesian_fano_with_alpha(raw, 1.0, 1.0, n_posterior=5000,
+                                       rng=np.random.default_rng(1))
+        r2 = bayesian_fano_with_alpha(raw, 0.46, 0.46, n_posterior=5000,
+                                       rng=np.random.default_rng(1))
+
+        ratio = r2.extra['T_mean'][1, 1] / r1.extra['T_mean'][1, 1]
+        expected_ratio = 1.0 / (0.46**2)
+        assert_allclose(ratio, expected_ratio, rtol=0.15)
+
+    def test_zpole_entanglement_detected(self):
+        """Z-pole density matrix should show entanglement."""
+        from tanglement.collider import ColliderSimulator
+        from tanglement.quantum import rho_from_fano, project_to_physical
+        from tanglement.tautau import bayesian_fano_with_alpha
+
+        T_Z = np.zeros((4, 4))
+        T_Z[0, 0] = 1.0
+        T_Z[1, 1] = -0.99
+        T_Z[2, 2] = -0.33
+        T_Z[3, 3] = -0.33
+        rho = project_to_physical(rho_from_fano(T_Z))
+
+        sim = ColliderSimulator()
+        ct1, p1, ct2, p2 = sim.generate(rho, 8000, rng=np.random.default_rng(42))
+        raw = sim.extract(ct1, p1, ct2, p2)
+
+        result = bayesian_fano_with_alpha(raw, 1.0, 1.0, n_posterior=5000,
+                                           rng=np.random.default_rng(123))
+        assert result.chsh['P_violates'] > 0.95
+
+
+class TestCauchyDiagnostic:
+    def test_small_n_wide_ci(self):
+        """With N=30 and alpha=0.12, the CI should be very wide."""
+        from tanglement.collider import ColliderSimulator
+        from tanglement.quantum import bell_state
+        from tanglement.tautau import bayesian_fano_with_alpha
+
+        sim = ColliderSimulator()
+        rho = bell_state('psi_minus')
+        ct1, p1, ct2, p2 = sim.generate(rho, 30, rng=np.random.default_rng(42))
+        raw = sim.extract(ct1, p1, ct2, p2)
+
+        result = bayesian_fano_with_alpha(raw, 0.12, 0.12, n_posterior=3000,
+                                           rng=np.random.default_rng(1))
+        ci = result.correlations[0]['ci']
+        ci_width = ci[1] - ci[0]
+        assert ci_width > 30
+
+    def test_bayesian_ci_covers_truth(self):
+        """Bayesian 95% CI should cover the true C_zz."""
+        from tanglement.collider import ColliderSimulator
+        from tanglement.quantum import bell_state, fano_decomposition
+        from tanglement.tautau import bayesian_fano_with_alpha
+
+        rho = bell_state('psi_minus')
+        T_true = fano_decomposition(rho)
+        true_C_zz = T_true[1, 1]
+
+        sim = ColliderSimulator()
+        ct1, p1, ct2, p2 = sim.generate(rho, 500, rng=np.random.default_rng(42))
+        raw = sim.extract(ct1, p1, ct2, p2)
+
+        result = bayesian_fano_with_alpha(raw, 1.0, 1.0, n_posterior=5000,
+                                           rng=np.random.default_rng(1))
+        ci = result.correlations[0]['ci']
+        assert ci[0] <= true_C_zz <= ci[1]

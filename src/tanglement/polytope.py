@@ -13,7 +13,7 @@ import numpy as np
 from scipy.optimize import linprog
 from typing import Dict
 
-__all__ = ["chsh_values", "in_local_polytope", "npa_level1"]
+__all__ = ["chsh_values", "in_local_polytope", "npa_level1", "nearest_local_point"]
 
 try:
     import cvxpy as cp
@@ -55,6 +55,31 @@ def in_local_polytope(c: np.ndarray) -> bool:
     res = linprog(np.zeros(n_v), A_eq=A_eq, b_eq=b_eq,
                   bounds=[(0, None)] * n_v, method='highs')
     return res.success
+
+
+def nearest_local_point(c: np.ndarray) -> np.ndarray:
+    """Find the point in the local polytope closest to *c* (L2 projection).
+
+    Solves: min ||V^T q - c||^2  s.t. q >= 0, 1^T q = 1.
+
+    Returns the projected correlation vector (same shape as *c*).
+    """
+    from scipy.optimize import minimize as sp_minimize
+    from .dag import BellDAG
+    V = BellDAG().vertex_matrix()
+    n_v = V.shape[0]
+
+    def objective(q):
+        return float(np.sum((V.T @ q - c) ** 2))
+
+    def jac(q):
+        return 2.0 * V @ (V.T @ q - c)
+
+    q0 = np.ones(n_v) / n_v
+    res = sp_minimize(objective, q0, jac=jac, method='SLSQP',
+                      bounds=[(0, None)] * n_v,
+                      constraints={'type': 'eq', 'fun': lambda q: q.sum() - 1})
+    return V.T @ res.x
 
 
 def npa_level1() -> float:
